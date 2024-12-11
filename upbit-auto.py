@@ -628,9 +628,10 @@ async def watch_price():
                                     logging.debug(f"{ticker} RSI 값이 조건을 충족하지 않으므로 매수를 진행하지 않습니다.")
 
                     # 종목 리스트 갱신 체크
-                    if time.time() - last_update >= update_interval:
-                        logging.info("종목 리스트 갱신을 위해 웹소켓 연결을 종료합니다.")
-                        break  # 내부 루프 종료하여 웹소켓 재연결
+                        if time.time() - last_update >= update_interval:
+                            logging.info("종목 리스트 갱신을 위해 웹소켓 연결을 종료합니다.")
+                            break  # 내부 루프 종료하여 웹소켓 재연결
+                    await asyncio.sleep(1)  # 잠시 대기 후 재연결
 
         except websockets.exceptions.ConnectionClosedError as e:
             logging.warning(f"웹소켓 연결 끊김, 재연결 시도 중: {e}")
