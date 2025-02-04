@@ -1,5 +1,6 @@
 import asyncio
 import time
+import math
 import pyupbit
 import json
 import pandas as pd
@@ -8,7 +9,7 @@ import aiohttp
 import logging
 from collections import defaultdict
 import concurrent.futures
-import requests  # requests.exceptions 처리를 위함
+import requests
 
 # ------------------------------------------------------------
 # 업비트 API 키 파일 경로 설정
@@ -18,12 +19,17 @@ key_file_path = r'C:\Users\winne\OneDrive\바탕 화면\upbit_key.txt'
 # ------------------------------------------------------------
 # 로깅 설정
 # ------------------------------------------------------------
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
 
 # ------------------------------------------------------------
 # 제외할 종목 목록
 # ------------------------------------------------------------
-excluded_tickers = ['KRW-BTC', 'KRW-USDT', 'KRW-BTG', 'KRW-MOCA', 'KRW-VTHO', 'KRW-SBD']
+excluded_tickers = [
+    'KRW-USDT', 'KRW-BTG', 'KRW-MOCA', 'KRW-VTHO', 'KRW-SBD'
+]
 
 # ------------------------------------------------------------
 # RateLimiter 클래스
@@ -40,10 +46,9 @@ class RateLimiter:
             now = asyncio.get_event_loop().time()
             # 이전 호출 기록에서 (now - period) 이전 것은 제거
             self.calls = [call for call in self.calls if call > now - self.period]
-
             if len(self.calls) >= self.max_calls:
                 sleep_time = self.calls[0] + self.period - now
-                logging.debug(f"RateLimiter: 요청 초과. {sleep_time:.2f}초 대기합니다.")
+                logging.debug(f"[RateLimiter] 요청 초과. {sleep_time:.2f}초 대기합니다.")
                 await asyncio.sleep(sleep_time)
             self.calls.append(now)
     
@@ -71,14 +76,13 @@ upbit = pyupbit.Upbit(access, secret)
 
 # ------------------------------------------------------------
 # API 요청 제한기 생성
-# (429를 많이 겪으면 숫자를 더 낮추세요.)
 # ------------------------------------------------------------
-order_request_limiter = RateLimiter(max_calls=5, period=1.0)      # 주문 관련
-non_order_request_limiter = RateLimiter(max_calls=25, period=1.0) # balances 등 일반 요청
+order_request_limiter = RateLimiter(max_calls=5, period=1.0)       # 주문 관련
+non_order_request_limiter = RateLimiter(max_calls=25, period=1.0)  # balances 등 일반 요청
 public_api_limiters = defaultdict(lambda: RateLimiter(max_calls=7, period=1.0))  # 티커 조회 등
 
 # ------------------------------------------------------------
-# 잔고 캐싱 관련 변수 (일부 주문에서는 실시간 잔고 확인을 위해 별도 함수 사용)
+# 잔고 캐싱 관련 변수
 # ------------------------------------------------------------
 balances_cache = {}
 balances_last_update = 0
@@ -96,17 +100,18 @@ MAX_SELL_ATTEMPTS = 3
 rsi_period = 14
 rsi_threshold = 11
 rsi_threshold_additional = 15
-initial_invest_ratio = 0.1
-target_profit_rate = 0.0030
-stop_loss_rate = -0.6
-maintain_profit_rate = -0.0055
+
+initial_invest_ratio = 0.05
+target_profit_rate = 0.0030      # +0.3%
+stop_loss_rate = -0.6           # -60%
+maintain_profit_rate = -0.0055  # -0.55%
 rsi_calculation_interval = 60
 min_hold_time_for_additional_buy = 600
 min_interval_between_additional_buys = 600
 max_additional_buys = 1000
 
 # ------------------------------------------------------------
-# 종목별 상태 관리용 딕셔너리들
+# 종목별 상태 관리용
 # ------------------------------------------------------------
 last_additional_buy_time = defaultdict(lambda: 0)
 hold_start_time = {}
@@ -120,8 +125,8 @@ in_position = defaultdict(bool)
 # ------------------------------------------------------------
 # 웹소켓/시세 캐싱
 # ------------------------------------------------------------
-previous_prices = {}  # 웹소켓에서 받은 최신가 저장
-previous_profit_rates = {}  # 최근 수익률 로그
+previous_prices = {}
+previous_profit_rates = {}
 
 # ------------------------------------------------------------
 # get_tick_size 함수
@@ -163,7 +168,7 @@ rsi_cache = {}
 rsi_timestamp = {}
 
 # ------------------------------------------------------------
-# 잔고 정보 업데이트 함수 (캐시 업데이트)
+# 잔고 정보 업데이트 (캐시)
 # ------------------------------------------------------------
 async def update_balances_cache():
     global balances_cache, balances_last_update
@@ -181,12 +186,12 @@ async def update_balances_cache():
                 }
             balances_cache = new_cache
             balances_last_update = time.time()
-            logging.debug("balances_cache 갱신 완료")
+            logging.debug("[update_balances_cache] balances_cache 갱신 완료")
         except Exception as e:
-            logging.error(f"balances 갱신 중 오류: {e}", exc_info=True)
+            logging.error(f"[update_balances_cache] balances 갱신 중 오류: {e}", exc_info=True)
 
 # ------------------------------------------------------------
-# 실시간 잔고 새로고침 함수 (캐시 대신 API 직접 호출)
+# 실시간 잔고 새로고침 함수
 # ------------------------------------------------------------
 async def get_fresh_balance(ticker):
     loop = asyncio.get_event_loop()
@@ -198,14 +203,14 @@ async def get_fresh_balance(ticker):
                 return float(b['balance']) + float(b['locked'])
         return 0.0
     except Exception as e:
-        logging.error(f"{ticker} 잔고 새로고침 오류: {e}", exc_info=True)
+        logging.error(f"[get_fresh_balance] {ticker} 잔고 새로고침 오류: {e}", exc_info=True)
         return 0.0
 
 # ------------------------------------------------------------
-# get_top_volume_tickers 함수 (상위 거래량 종목)
+# 상위 거래량 종목 조회
 # ------------------------------------------------------------
-async def get_top_volume_tickers(limit=30):
-    logging.debug("상위 거래량 종목 조회 시작")
+async def get_top_volume_tickers(limit=5):
+    logging.debug("[get_top_volume_tickers] 상위 거래량 종목 조회 시작")
     loop = asyncio.get_event_loop()
     tickers = await loop.run_in_executor(executor, pyupbit.get_tickers, "KRW")
     url = "https://api.upbit.com/v1/ticker"
@@ -218,29 +223,31 @@ async def get_top_volume_tickers(limit=30):
     data.sort(key=lambda x: x['acc_trade_price_24h'], reverse=True)
     top_tickers = [x['market'] for x in data if x['market'] not in excluded_tickers]
     top_tickers = top_tickers[:limit]
-    logging.debug("상위 거래량 종목 조회 완료")
+    logging.debug("[get_top_volume_tickers] 상위 거래량 종목 조회 완료")
     return top_tickers
 
 # ------------------------------------------------------------
-# get_ohlcv_async 함수 (RSI 계산용)
+# OHLCV (캔들) 비동기 조회
 # ------------------------------------------------------------
 async def get_ohlcv_async(ticker, interval="minute1", count=200):
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(executor, pyupbit.get_ohlcv, ticker, interval, count)
 
 # ------------------------------------------------------------
-# get_rsi 함수
+# RSI 계산
 # ------------------------------------------------------------
 async def get_rsi(ticker):
     now = time.time()
+    # 일정 시간 내에 이미 계산된 값이 있으면 캐시 사용
     if ticker in rsi_cache and now - rsi_timestamp.get(ticker, 0) < rsi_calculation_interval:
         return rsi_cache[ticker]
+
     try:
         endpoint = 'ohlcv'
         async with public_api_limiters[endpoint]:
             df = await get_ohlcv_async(ticker, interval="minute1", count=rsi_period * 2)
         if df is None or df.empty:
-            logging.warning(f"{ticker} 데이터 없음")
+            logging.warning(f"[get_rsi] {ticker} 데이터 없음")
             return None
 
         close = df['close']
@@ -258,36 +265,30 @@ async def get_rsi(ticker):
         rsi_timestamp[ticker] = now
         return rsi_value
     except Exception as e:
-        logging.error(f"{ticker} RSI 계산 오류: {e}", exc_info=True)
+        logging.error(f"[get_rsi] {ticker} RSI 계산 오류: {e}", exc_info=True)
         return None
 
 # ------------------------------------------------------------
-# 다중 종목 시세 한 번에 조회 (HTTP 429 완화)
+# 다중 종목 현재가 조회 (HTTP 429 완화)
 # ------------------------------------------------------------
 async def get_current_prices_async(tickers: list[str]) -> dict:
-    """
-    tickers: ["KRW-BTC", "KRW-ETH", ...]
-    반환 예: {"KRW-BTC": 41000000.0, "KRW-ETH": 3000000.0, ...}
-    """
     if not tickers:
         return {}
     url = "https://api.upbit.com/v1/ticker"
     params = {"markets": ",".join(tickers)}
 
     results = {}
-    async with public_api_limiters['ticker']:  # RateLimit
+    async with public_api_limiters['ticker']:
         async with aiohttp.ClientSession() as session:
             try:
                 async with session.get(url, params=params, timeout=5) as resp:
                     if resp.status == 429:
-                        # Too Many Requests
-                        logging.warning(f"[get_current_prices_async] 429 오류. 잠시 후 재시도 권장.")
+                        logging.warning("[get_current_prices_async] 429 오류. 잠시 후 재시도 권장.")
                         return {}
                     if resp.status != 200:
-                        logging.error(f"현재가 조회 HTTP 오류 상태: {resp.status}, tickers={tickers}")
+                        logging.error(f"[get_current_prices_async] 현재가 조회 HTTP 오류 상태: {resp.status}")
                         return {}
                     data = await resp.json()
-                    # data는 보통 list
                     if not isinstance(data, list):
                         return {}
                     for item in data:
@@ -296,32 +297,25 @@ async def get_current_prices_async(tickers: list[str]) -> dict:
                         if market and trade_price:
                             results[market] = trade_price
             except asyncio.TimeoutError:
-                logging.error(f"현재가 조회 타임아웃: {tickers}")
+                logging.error(f"[get_current_prices_async] 현재가 조회 타임아웃: {tickers}")
             except Exception as e:
-                logging.error(f"현재가 조회 예외: {e}", exc_info=True)
+                logging.error(f"[get_current_prices_async] 현재가 조회 예외: {e}", exc_info=True)
     return results
 
 # ------------------------------------------------------------
-# 웹소켓에서 받은 가격이 없는 경우 fallback
+# 웹소켓 없이도 현재가를 가져올 수 있도록 fallback
 # ------------------------------------------------------------
 async def get_price_from_cache_or_api(ticker):
-    """
-    1) 우선 previous_prices[ticker] (웹소켓 최신가) 사용
-    2) 없다면 get_current_prices_async()로 한번에 가져오고 캐싱
-    """
-    # 1) 웹소켓 가격
     price = previous_prices.get(ticker)
     if price is not None:
         return price
 
-    # 2) fallback - 단일 종목만이라도 조회
     fallback_result = await get_current_prices_async([ticker])
     if ticker in fallback_result:
-        # fallback으로 가져온 가격도 캐싱(웹소켓 대용)
         previous_prices[ticker] = fallback_result[ticker]
         return fallback_result[ticker]
 
-    return None  # 그래도 못 구하면 None
+    return None
 
 # ------------------------------------------------------------
 # 업비트 API 래퍼 함수들
@@ -331,11 +325,11 @@ async def upbit_get_balances_async():
     try:
         return await loop.run_in_executor(executor, upbit.get_balances)
     except (requests.exceptions.ConnectTimeout, requests.exceptions.ReadTimeout) as e:
-        logging.error(f"balances 조회 Timeout 오류: {e}", exc_info=True)
+        logging.error(f"[upbit_get_balances_async] Timeout 오류: {e}", exc_info=True)
         await asyncio.sleep(5)
         return await loop.run_in_executor(executor, upbit.get_balances)
     except Exception as e:
-        logging.error(f"balances 조회 오류: {e}", exc_info=True)
+        logging.error(f"[upbit_get_balances_async] balances 조회 오류: {e}", exc_info=True)
         await asyncio.sleep(5)
         return await loop.run_in_executor(executor, upbit.get_balances)
 
@@ -378,10 +372,10 @@ async def upbit_get_balance_async(ticker):
     return 0.0
 
 # ------------------------------------------------------------
-# cancel_existing_sell_orders (기존 지정가 매도 주문 모두 취소)
+# 기존 지정가 매도 주문 모두 취소
 # ------------------------------------------------------------
 async def cancel_existing_sell_orders():
-    logging.info("기존 지정가 매도 주문 취소 진행...")
+    logging.info("[cancel_existing_sell_orders] 기존 지정가 매도 주문 취소 진행...")
     async with non_order_request_limiter:
         orders = await upbit_get_order_list_async(state='wait')
     if isinstance(orders, list):
@@ -394,26 +388,26 @@ async def cancel_existing_sell_orders():
                 market = order.get('market')
                 if not uuid or not market:
                     continue
-                logging.info(f"{market} 매도 주문 취소 진행")
+                logging.info(f"[cancel_existing_sell_orders] {market} 매도 주문 취소 진행")
                 try:
                     async with order_request_limiter:
                         await upbit_cancel_order_async(uuid)
-                    logging.info(f"{market} 매도 주문 취소 완료")
+                    logging.info(f"[cancel_existing_sell_orders] {market} 매도 주문 취소 완료")
                 except Exception as e:
-                    logging.error(f"{market} 매도 주문 취소 실패: {e}", exc_info=True)
+                    logging.error(f"[cancel_existing_sell_orders] {market} 매도 주문 취소 실패: {e}", exc_info=True)
     else:
-        logging.warning("미체결 주문이 없거나 조회 실패")
+        logging.warning("[cancel_existing_sell_orders] 미체결 주문이 없거나 조회 실패")
 
 # ------------------------------------------------------------
-# place_buy_order (매수 주문)
+# 매수 주문
 # ------------------------------------------------------------
 async def place_buy_order(ticker, krw_balance, invest_amount):
-    logging.debug(f"{ticker} 매수 주문 시작. 투자액: {invest_amount}")
+    logging.debug(f"[place_buy_order] {ticker} 매수 주문 시작. 투자액: {invest_amount}")
     max_attempts = 1
     for attempt in range(1, max_attempts + 1):
         current_price = await get_price_from_cache_or_api(ticker)
         if current_price is None:
-            logging.error(f"{ticker} 매수가 불가능한 현재가(None). 매수 스킵")
+            logging.error(f"[place_buy_order] {ticker} 현재가가 None, 매수 불가")
             return
 
         try:
@@ -423,7 +417,7 @@ async def place_buy_order(ticker, krw_balance, invest_amount):
                     current_price,
                     invest_amount / current_price
                 )
-            logging.info(f"{ticker} 매수 주문 시도 {attempt}회 - 가격: {current_price}, 금액: {invest_amount}")
+            logging.info(f"[place_buy_order] {ticker} 매수 주문 시도 {attempt}회 - 가격: {current_price}, 금액: {invest_amount}")
             await asyncio.sleep(1)
             async with non_order_request_limiter:
                 order_info = await upbit_get_order_async(order['uuid'])
@@ -434,116 +428,168 @@ async def place_buy_order(ticker, krw_balance, invest_amount):
                     await asyncio.sleep(1)
                     balance = await upbit_get_balance_async(ticker)
                     if balance > 0:
-                        logging.info(f"{ticker} 잔고 업데이트 완료: {balance}")
+                        logging.info(f"[place_buy_order] {ticker} 잔고 업데이트 완료: {balance}")
                         break
                 else:
-                    logging.warning(f"{ticker} 잔고 업데이트 지연")
+                    logging.warning(f"[place_buy_order] {ticker} 잔고 업데이트 지연")
+
                 in_position[ticker] = True
                 holding_tickers[ticker] = balance
                 hold_start_time[ticker] = time.time()
+
                 avg_buy_price = await get_avg_buy_price_from_balances(ticker)
                 if avg_buy_price is not None:
                     avg_buy_price_holdings[ticker] = avg_buy_price
+
+                # 바로 매도 주문 걸어둠
                 await place_limit_sell_order(ticker)
                 return
             else:
-                logging.info(f"{ticker} 매수 미체결 - 주문 취소 후 재시도")
+                logging.info(f"[place_buy_order] {ticker} 매수 미체결 -> 주문 취소 후 재시도")
                 async with non_order_request_limiter:
                     await upbit_cancel_order_async(order['uuid'])
                 await asyncio.sleep(0.5)
+
         except Exception as e:
-            logging.error(f"{ticker} 매수 주문 실패: {e}", exc_info=True)
+            logging.error(f"[place_buy_order] {ticker} 매수 주문 실패: {e}", exc_info=True)
             await asyncio.sleep(0.5)
-    logging.error(f"{ticker} 매수 실패 - 최대 시도 횟수 초과")
+
+    logging.error(f"[place_buy_order] {ticker} 매수 실패 - 최대 시도 횟수 초과")
 
 # ------------------------------------------------------------
-# place_limit_sell_order (지정가 매도)
+# 지정가 매도 주문 (취소 후 locked 해제 대기 로직 추가)
 # ------------------------------------------------------------
 async def place_limit_sell_order(ticker):
-    logging.debug(f"{ticker} 지정가 매도 주문 시작")
+    logging.debug(f"[place_limit_sell_order] {ticker} 지정가 매도 주문 시작")
 
+    # 1) 평균 매수가
     avg_buy_price = await get_avg_buy_price_from_balances(ticker)
     if avg_buy_price is None:
-        logging.warning(f"{ticker} 평균 매수가 정보 없음. 매도 중단")
+        logging.warning(f"[place_limit_sell_order] {ticker} 평균 매수가 정보 없음. 매도 중단")
         return
 
+    # 2) 목표 매도가 계산
     target_price = float(avg_buy_price) * (1 + target_profit_rate + 0.001)
     tick_size = get_tick_size(target_price)
     target_price = (target_price // tick_size) * tick_size
 
+    # 3) 실제 잔고(locked 포함)를 가져옴
     current_balance = await get_fresh_balance(ticker)
     if current_balance <= 0:
-        logging.info(f"{ticker} 실시간 잔고 부족. 매도 중단")
+        logging.info(f"[place_limit_sell_order] {ticker} 실시간 잔고 0, 매도 중단")
         return
 
     total_order_value = target_price * current_balance
     if total_order_value < MIN_SELL_ORDER_KRW:
-        logging.warning(f"{ticker} 매도 주문 총액 {total_order_value:.2f}원이 최소 주문 기준 {MIN_SELL_ORDER_KRW}원 미달")
+        logging.warning(f"[place_limit_sell_order] {ticker} 매도 주문 총액 {total_order_value:.2f}원 미달")
         return
 
-    attempt = 0
-    while attempt < MAX_SELL_ATTEMPTS:
-        attempt += 1
-        current_balance = await get_fresh_balance(ticker)
-        if current_balance <= 0:
-            logging.info(f"{ticker} 잔고 0. 매도 중단")
-            return
-        current_order_value = target_price * current_balance
-        if current_order_value < MIN_SELL_ORDER_KRW:
-            logging.warning(f"{ticker} 매도 주문 총액 {current_order_value:.2f}원 미달")
-            return
-        try:
-            async with order_request_limiter:
-                if sell_order_uuid[ticker]:
-                    logging.info(f"{ticker} 기존 매도 주문 취소 시도")
-                    try:
-                        await upbit_cancel_order_async(sell_order_uuid[ticker])
-                    except Exception as e:
-                        logging.error(f"{ticker} 매도 주문 취소 실패: {e}", exc_info=True)
-                    sell_order_uuid[ticker] = None
-                    sell_order_time[ticker] = None
+    try:
+        # 4) 기존 매도 주문이 있으면 취소 후, locked 해제 대기
+        if sell_order_uuid[ticker]:
+            old_uuid = sell_order_uuid[ticker]
+            logging.info(f"[place_limit_sell_order] {ticker} 기존 매도 주문 취소 시도. uuid={old_uuid}")
+            try:
+                async with order_request_limiter:
+                    cancel_result = await upbit_cancel_order_async(old_uuid)
+                logging.info(f"[place_limit_sell_order] {ticker} 기존 매도 주문 취소 요청 결과: {cancel_result}")
+            except Exception as e:
+                logging.error(f"[place_limit_sell_order] {ticker} 기존 매도 주문 취소 실패: {e}", exc_info=True)
+            
+            # 기존 매도 주문 정보 초기화
+            sell_order_uuid[ticker] = None
+            sell_order_time[ticker] = None
 
-            async with order_request_limiter:
-                order = await upbit_sell_limit_order_async(ticker, target_price, current_balance)
+            # 최대 5초(0.5초 간격) 기다리면서 locked 잔고가 풀리는지 확인
+            cancel_start = time.time()
+            original_balance = current_balance
+            while time.time() - cancel_start < 5:
+                await asyncio.sleep(0.5)
+                # 다시 fresh_balance로 업데이트
+                new_balance = await get_fresh_balance(ticker)
+                # locked가 충분히 줄었다고 판단(실제 잔고 변동이 없거나 0이 됐는지 등)
+                if new_balance <= 0:
+                    logging.info(f"[place_limit_sell_order] {ticker} 잔고가 0이 됨 -> 이미 매도되었을 가능성, 스킵.")
+                    return
+                # 혹은 잔고 차이가 매우 작으면 locked가 풀렸다고 판단
+                if abs(new_balance - original_balance) < 1e-7:
+                    logging.info(f"[place_limit_sell_order] {ticker} locked 해제 감지 -> 재주문 진행")
+                    break
+            else:
+                logging.warning(f"[place_limit_sell_order] {ticker} 5초 이내 locked 해제 안됨. 그래도 재시도")
 
-            if order is None or not isinstance(order, dict):
-                error_msg = order if order is not None else "None"
-                logging.error(f"{ticker} 매도 응답이 dict 아님: {error_msg} (시도 {attempt}/{MAX_SELL_ATTEMPTS})")
+        # 5) 새 매도 주문 시도
+        attempt = 0
+        while attempt < MAX_SELL_ATTEMPTS:
+            attempt += 1
+            # 최신 잔고 재확인
+            current_balance = await get_fresh_balance(ticker)
+            if current_balance <= 0:
+                logging.info(f"[place_limit_sell_order] {ticker} 재확인: 잔고 0 -> 매도 중단")
+                return
+
+            current_order_value = target_price * current_balance
+            if current_order_value < MIN_SELL_ORDER_KRW:
+                logging.warning(f"[place_limit_sell_order] {ticker} 재확인: 매도 주문 총액 {current_order_value:.2f}원 미달")
+                return
+
+            # 조금 안전하게 잔고를 0.9999 곱해서 수수료/소수점오류 방지
+            safe_balance = math.floor(current_balance * 0.9999 * 1000000) / 1000000
+            if safe_balance <= 0:
+                logging.info(f"[place_limit_sell_order] {ticker} safe_balance=0 -> 매도 중단")
+                return
+
+            try:
+                async with order_request_limiter:
+                    order = await upbit_sell_limit_order_async(ticker, target_price, safe_balance)
+                if not order or not isinstance(order, dict):
+                    error_msg = order if order is not None else "None"
+                    logging.error(f"[place_limit_sell_order] {ticker} 매도 응답이 dict 아님: {error_msg} (시도 {attempt}/{MAX_SELL_ATTEMPTS})")
+                    await asyncio.sleep(1)
+                    continue
+
+                # 매도 주문 성공
+                sell_order_uuid[ticker] = order.get('uuid')
+                sell_order_time[ticker] = time.time()
+                logging.info(
+                    f"[place_limit_sell_order] {ticker} 지정가 매도 주문 완료 - "
+                    f"가격: {target_price}, 수량: {safe_balance}, uuid: {sell_order_uuid[ticker]}"
+                )
+                return
+            except Exception as e:
+                logging.error(
+                    f"[place_limit_sell_order] {ticker} 지정가 매도 주문 실패 (시도 {attempt}/{MAX_SELL_ATTEMPTS}): {e}",
+                    exc_info=True
+                )
                 await asyncio.sleep(1)
-                continue
 
-            sell_order_uuid[ticker] = order.get('uuid')
-            sell_order_time[ticker] = time.time()
-            logging.info(f"{ticker} 지정가 매도 주문 실행 - 가격: {target_price}, 수량: {current_balance}")
-            return
-        except Exception as e:
-            logging.error(f"{ticker} 지정가 매도 주문 실패 (시도 {attempt}/{MAX_SELL_ATTEMPTS}): {e}", exc_info=True)
-            await asyncio.sleep(1)
+        logging.error(f"[place_limit_sell_order] {ticker} 매도 주문 실패 - 최대 시도 횟수 초과")
 
-    logging.error(f"{ticker} 매도 주문 실패 - 최대 시도 횟수 초과")
+    except Exception as e:
+        logging.error(f"[place_limit_sell_order] {ticker} 예외 발생: {e}", exc_info=True)
 
 # ------------------------------------------------------------
-# place_market_sell_order (시장가 매도)
+# 시장가 매도 주문
 # ------------------------------------------------------------
 async def place_market_sell_order(ticker):
-    logging.debug(f"{ticker} 시장가 매도 주문 시작")
+    logging.debug(f"[place_market_sell_order] {ticker} 시장가 매도 주문 시작")
+
     current_balance = await get_fresh_balance(ticker)
     if current_balance <= 0:
-        logging.info(f"{ticker} 잔고 부족. 시장가 매도 중단")
+        logging.info(f"[place_market_sell_order] {ticker} 잔고 부족, 매도 중단")
         return
 
     current_price = previous_prices.get(ticker)
     if current_price is None:
-        # fallback
         p = await get_current_prices_async([ticker])
         current_price = p.get(ticker)
     if current_price is None:
-        logging.warning(f"{ticker} 현재가 조회 실패로 시장가 매도 취소")
+        logging.warning(f"[place_market_sell_order] {ticker} 현재가 조회 실패 -> 매도 취소")
         return
 
     total_order_value = current_price * current_balance
     if total_order_value < MIN_SELL_ORDER_KRW:
-        logging.warning(f"{ticker} 시장가 매도 총액 {total_order_value:.2f}원이 최소 주문 기준 {MIN_SELL_ORDER_KRW}원 미달")
+        logging.warning(f"[place_market_sell_order] {ticker} 매도 총액 {total_order_value:.2f}원 미달")
         return
 
     attempt = 0
@@ -554,18 +600,18 @@ async def place_market_sell_order(ticker):
                 order = await upbit_sell_market_order_async(ticker, current_balance)
             if not isinstance(order, dict):
                 error_msg = order if order is not None else "None"
-                logging.error(f"{ticker} 시장가 매도 응답이 dict 아님: {error_msg} (시도 {attempt}/{MAX_SELL_ATTEMPTS})")
+                logging.error(f"[place_market_sell_order] {ticker} 시장가 매도 응답이 dict 아님: {error_msg} (시도 {attempt}/{MAX_SELL_ATTEMPTS})")
                 await asyncio.sleep(1)
                 continue
             logging.info(f"[매도 체결 완료] {ticker} 시장가 매도 - 수량: {current_balance}")
             return
         except Exception as e:
-            logging.error(f"{ticker} 시장가 매도 주문 실패 (시도 {attempt}/{MAX_SELL_ATTEMPTS}): {e}", exc_info=True)
+            logging.error(f"[place_market_sell_order] {ticker} 시장가 매도 주문 실패 (시도 {attempt}/{MAX_SELL_ATTEMPTS}): {e}", exc_info=True)
             await asyncio.sleep(1)
-    logging.error(f"{ticker} 시장가 매도 주문 실패 - 최대 시도 횟수 초과")
+    logging.error(f"[place_market_sell_order] {ticker} 시장가 매도 주문 실패 - 최대 시도 횟수 초과")
 
 # ------------------------------------------------------------
-# should_skip_new_buy (신규 매수 제한 조건)
+# 신규 매수 제한 조건 (고액 코인 3개 이상 보유 시 매수 제한)
 # ------------------------------------------------------------
 async def should_skip_new_buy():
     count = 0
@@ -577,255 +623,229 @@ async def should_skip_new_buy():
         if price is not None and (price * holding_tickers[held]) >= 500000:
             count += 1
     if count >= 3:
-        logging.info(f"보유 중인 고액 코인 수 {count}개 (>=3개). 신규 매수 스킵.")
+        logging.info(f"[should_skip_new_buy] 보유 중인 고액 코인 수 {count}개 -> 신규 매수 스킵")
         return True
     return False
 
 # ------------------------------------------------------------
-# watch_price 함수 (웹소켓 실시간 처리)
+# 실시간 시세 처리 (웹소켓)
 # ------------------------------------------------------------
 async def watch_price():
     url = "wss://api.upbit.com/websocket/v1"
     global previous_prices, previous_profit_rates
-    last_update = 0
-    update_interval = 7200
-    last_log_time = time.time()
 
-    while True:
-        try:
-            # 주기적으로 상위 거래량 종목 리스트 업데이트
-            if time.time() - last_update >= update_interval:
-                logging.info("상위 거래량 종목 리스트 갱신 중...")
-                tickers = await get_top_volume_tickers()
-                last_update = time.time()
-            else:
-                if 'tickers' not in locals():
-                    tickers = await get_top_volume_tickers()
+    update_interval = 60  # 디버깅용
+    start_time = time.time()
 
-            all_tickers = list(set(tickers + list(holding_tickers.keys())))
-            all_tickers = [ticker for ticker in all_tickers if ticker not in excluded_tickers]
+    websocket = None
+    try:
+        logging.info("[watch_price] 웹소켓 연결 시도")
+        websocket = await websockets.connect(url, ping_interval=60, ping_timeout=10)
+        logging.info("[watch_price] 웹소켓 연결 완료")
 
-            logging.debug(f"웹소켓 연결 시도 - 종목 수: {len(all_tickers)}")
+        tickers = await get_top_volume_tickers(limit=5)
+        all_tickers = list(set(tickers + list(holding_tickers.keys())))
+        all_tickers = [t for t in all_tickers if t not in excluded_tickers]
 
-            async with websockets.connect(url, ping_interval=60, ping_timeout=10) as websocket:
-                subscribe_data = [
-                    {"ticket": "test"},
-                    {"type": "ticker", "codes": all_tickers, "isOnlyRealtime": True},
-                    {"format": "SIMPLE"}
-                ]
-                await websocket.send(json.dumps(subscribe_data))
-                logging.info("웹소켓 구독 요청 완료")
+        subscribe_data = [
+            {"ticket": "test"},
+            {"type": "ticker", "codes": all_tickers, "isOnlyRealtime": True},
+            {"format": "SIMPLE"}
+        ]
+        await websocket.send(json.dumps(subscribe_data))
+        logging.info(f"[watch_price] 웹소켓 구독 요청 완료. 대상 종목 수: {len(all_tickers)}")
 
-                while True:
-                    try:
-                        data = await asyncio.wait_for(websocket.recv(), timeout=30)
-                    except asyncio.TimeoutError:
-                        logging.warning("30초간 데이터 수신 없음, 재연결 시도")
-                        break
+        while True:
+            elapsed = time.time() - start_time
+            if elapsed >= update_interval:
+                logging.info("[watch_price] 종목 리스트 갱신 위해 웹소켓 종료 요청")
+                return
 
-                    if time.time() - last_log_time > 30:
-                        logging.debug("watch_price 루프 정상 동작 중...")
-                        last_log_time = time.time()
+            try:
+                data = await asyncio.wait_for(websocket.recv(), timeout=30)
+            except asyncio.TimeoutError:
+                logging.warning("[watch_price] 30초간 데이터 수신 없어 재연결 필요. return")
+                return
 
-                    try:
-                        data = json.loads(data)
-                    except json.JSONDecodeError:
-                        logging.error("웹소켓 데이터 파싱 오류", exc_info=True)
+            try:
+                data = json.loads(data)
+            except json.JSONDecodeError:
+                logging.error("[watch_price] 웹소켓 데이터 파싱 오류", exc_info=True)
+                continue
+
+            if not isinstance(data, dict):
+                continue
+            if 'cd' not in data or 'tp' not in data:
+                continue
+
+            ticker = data['cd']
+            current_price = data['tp']
+            previous_prices[ticker] = current_price
+
+            rsi = await get_rsi(ticker)
+            rsi_str = f"{rsi:.2f}" if rsi is not None else "N/A"
+            logging.info(f"[watch_price] {ticker} 실시간 가격: {current_price}, RSI: {rsi_str}")
+
+            total_balance = await upbit_get_balance_async(ticker)
+            if total_balance > 0:
+                in_position[ticker] = True
+                if ticker not in holding_tickers:
+                    holding_tickers[ticker] = total_balance
+                    hold_start_time[ticker] = time.time()
+                    additional_buy_count[ticker] = 0
+                    sell_order_uuid[ticker] = None
+                    sell_order_time[ticker] = None
+                    avg_price = await get_avg_buy_price_from_balances(ticker)
+                    avg_buy_price_holdings[ticker] = avg_price if avg_price else 0.0
+                    await place_limit_sell_order(ticker)
+                else:
+                    avg_buy_price = avg_buy_price_holdings.get(ticker, 0.0)
+                    if avg_buy_price <= 0:
                         continue
+                    profit_rate = (current_price - avg_buy_price) / avg_buy_price
 
-                    if not isinstance(data, dict):
-                        logging.debug(f"웹소켓 데이터가 dict 아님: {data}")
-                        continue
-                    if 'cd' not in data or 'tp' not in data:
-                        logging.debug("웹소켓 데이터에 cd나 tp 키가 없음")
-                        continue
+                    if (ticker not in previous_profit_rates or
+                        abs(previous_profit_rates[ticker] - profit_rate) >= 0.0001):
+                        logging.info(f"[watch_price] {ticker} 수익률: {profit_rate*100:.2f}%")
+                        previous_profit_rates[ticker] = profit_rate
 
-                    ticker = data['cd']
-                    current_price = data['tp']
-                    # 시세 캐시 저장
-                    previous_prices[ticker] = current_price
+                    if profit_rate <= stop_loss_rate:
+                        logging.info(f"[watch_price] {ticker} 손절 조건 충족 -> 시장가 매도")
+                        if sell_order_uuid[ticker]:
+                            logging.info(f"[watch_price] {ticker} 기존 매도 주문 취소 시도")
+                            try:
+                                async with non_order_request_limiter:
+                                    await upbit_cancel_order_async(sell_order_uuid[ticker])
+                                sell_order_uuid[ticker] = None
+                                sell_order_time[ticker] = None
+                            except Exception as e:
+                                logging.error(f"[watch_price] {ticker} 매도 주문 취소 실패: {e}", exc_info=True)
+                        await place_market_sell_order(ticker)
+                        in_position[ticker] = False
+                        holding_tickers.pop(ticker, None)
+                        avg_buy_price_holdings.pop(ticker, None)
+                        additional_buy_count.pop(ticker, None)
+                        hold_start_time.pop(ticker, None)
+                        sell_order_uuid.pop(ticker, None)
+                        sell_order_time.pop(ticker, None)
 
-                    # RSI
-                    rsi = await get_rsi(ticker)
-                    rsi_str = f"{rsi:.2f}" if rsi is not None else "N/A"
+                    elif profit_rate <= maintain_profit_rate:
+                        logging.info(f"[watch_price] {ticker} 추가매수 조건 이하")
+                        elapsed_buy = time.time() - last_additional_buy_time[ticker]
+                        if elapsed_buy >= min_interval_between_additional_buys:
+                            if additional_buy_count[ticker] < max_additional_buys:
+                                if rsi and rsi < rsi_threshold_additional:
+                                    Q0 = await get_fresh_balance(ticker)
+                                    P0 = avg_buy_price_holdings.get(ticker, 0.0)
+                                    if P0 <= 0:
+                                        continue
+                                    X = - Q0 * ((current_price / 0.995) - P0) / (0.00502513 * current_price)
+                                    if X <= 0:
+                                        continue
 
-                    logging.info(f"{ticker} 실시간 가격: {current_price}, RSI: {rsi_str}")
+                                    additional_invest_amount = X * current_price
+                                    fee = additional_invest_amount * 0.0005
+                                    total_needed = additional_invest_amount + fee
 
-                    # 보유 여부
-                    total_balance = await upbit_get_balance_async(ticker)
-                    if total_balance > 0:
-                        in_position[ticker] = True
-                        if ticker not in holding_tickers:
-                            # 신규 편입
-                            holding_tickers[ticker] = total_balance
-                            hold_start_time[ticker] = time.time()
-                            additional_buy_count[ticker] = 0
+                                    krw_balance = await upbit_get_balance_async("KRW-KRW")
+                                    if total_needed > krw_balance:
+                                        logging.info(f"[watch_price] {ticker} 추가매수 잔고 부족")
+                                        continue
+
+                                    logging.info(f"[watch_price] {ticker} 추가매수 진행 -> 수량={X:.4f}, 금액={additional_invest_amount:.2f}")
+                                    await place_buy_order(ticker, krw_balance, additional_invest_amount)
+                                    additional_buy_count[ticker] += 1
+                                    last_additional_buy_time[ticker] = time.time()
+                                    hold_start_time[ticker] = time.time()
+
+                                    new_avg = await get_avg_buy_price_from_balances(ticker)
+                                    if new_avg:
+                                        avg_buy_price_holdings[ticker] = new_avg
+
+                                    await place_limit_sell_order(ticker)
+                                else:
+                                    logging.info(f"[watch_price] {ticker} RSI 추가매수 기준 미충족")
+                            else:
+                                logging.info(f"[watch_price] {ticker} 추가매수 횟수({max_additional_buys}) 초과")
+                        else:
+                            remain_buy = min_interval_between_additional_buys - elapsed_buy
+                            logging.info(f"[watch_price] {ticker} 추가매수 대기중: {remain_buy:.2f}초 남음")
+
+                    if sell_order_uuid[ticker]:
+                        async with non_order_request_limiter:
+                            try:
+                                order_info = await upbit_get_order_async(sell_order_uuid[ticker])
+                            except Exception as e:
+                                logging.error(f"[watch_price] {ticker} 매도 주문 조회 실패: {e}", exc_info=True)
+                                order_info = None
+
+                        if order_info and order_info.get('state') == 'done':
+                            logging.info(f"[매도 체결 완료] {ticker} 지정가 매도")
+                            in_position[ticker] = False
+                            holding_tickers.pop(ticker, None)
+                            avg_buy_price_holdings.pop(ticker, None)
+                            additional_buy_count.pop(ticker, None)
+                            hold_start_time.pop(ticker, None)
                             sell_order_uuid[ticker] = None
                             sell_order_time[ticker] = None
-                            avg_price = await get_avg_buy_price_from_balances(ticker)
-                            avg_buy_price_holdings[ticker] = avg_price if avg_price else 0.0
-                            await place_limit_sell_order(ticker)
                         else:
-                            # 기존 보유
-                            avg_buy_price = avg_buy_price_holdings.get(ticker, 0.0)
-                            if avg_buy_price <= 0:
-                                logging.warning(f"{ticker} 평균 매수가 없어서 수익률 계산 불가")
-                                continue
-                            profit_rate = (current_price - avg_buy_price) / avg_buy_price
-                            if (ticker not in previous_profit_rates or
-                                abs(previous_profit_rates[ticker] - profit_rate) >= 0.0001):
-                                logging.info(f"{ticker} 보유: {total_balance}, 수익률: {profit_rate*100:.2f}%")
-                                previous_profit_rates[ticker] = profit_rate
-
-                            # 손절
-                            if profit_rate <= stop_loss_rate:
-                                logging.info(f"{ticker} 손절 조건 충족")
-                                if sell_order_uuid[ticker]:
-                                    logging.info(f"{ticker} 매도 주문 취소")
-                                    try:
-                                        async with non_order_request_limiter:
-                                            await upbit_cancel_order_async(sell_order_uuid[ticker])
-                                        sell_order_uuid[ticker] = None
-                                        sell_order_time[ticker] = None
-                                    except Exception as e:
-                                        logging.error(f"{ticker} 매도 주문 취소 실패: {e}", exc_info=True)
-                                await place_market_sell_order(ticker)
-                                # 보유 해제
-                                in_position[ticker] = False
-                                holding_tickers.pop(ticker, None)
-                                avg_buy_price_holdings.pop(ticker, None)
-                                additional_buy_count.pop(ticker, None)
-                                hold_start_time.pop(ticker, None)
-                                sell_order_uuid.pop(ticker, None)
-                                sell_order_time.pop(ticker, None)
-
-                            # 추가매수
-                            elif profit_rate <= maintain_profit_rate:
-                                logging.info(f"{ticker} 수익률 추가매수 기준 이하")
-                                elapsed = time.time() - last_additional_buy_time[ticker]
-                                if elapsed >= min_interval_between_additional_buys:
-                                    if additional_buy_count[ticker] < max_additional_buys:
-                                        if rsi and rsi < rsi_threshold_additional:
-                                            # 추가매수 수량
-                                            Q0 = await get_fresh_balance(ticker)
-                                            P0 = avg_buy_price_holdings.get(ticker, 0.0)
-                                            if P0 <= 0:
-                                                logging.warning(f"{ticker} 평균 매수가 불명")
-                                                continue
-                                            X = - Q0 * ((current_price / 0.995) - P0) / (0.00502513 * current_price)
-                                            if X <= 0:
-                                                logging.info(f"{ticker} 추가매수 계산된 수량이 0 이하. 중단")
-                                                continue
-                                            additional_invest_amount = X * current_price
-                                            fee = additional_invest_amount * 0.0005
-                                            total_needed = additional_invest_amount + fee
-
-                                            krw_balance = await upbit_get_balance_async("KRW-KRW")
-                                            if total_needed > krw_balance:
-                                                logging.info(f"{ticker} 추가매수 잔고 부족. 필요={total_needed:.2f}, 보유={krw_balance:.2f}")
-                                                continue
-                                            logging.info(f"{ticker} 추가매수 진행: {X:.4f}, 금액={additional_invest_amount:.2f}")
-                                            await place_buy_order(ticker, krw_balance, additional_invest_amount)
-                                            additional_buy_count[ticker] += 1
-                                            last_additional_buy_time[ticker] = time.time()
-                                            hold_start_time[ticker] = time.time()
-                                            new_avg = await get_avg_buy_price_from_balances(ticker)
-                                            if new_avg:
-                                                avg_buy_price_holdings[ticker] = new_avg
-                                            await place_limit_sell_order(ticker)
-                                        else:
-                                            logging.info(f"{ticker} RSI 추가매수 기준 미충족")
-                                    else:
-                                        logging.info(f"{ticker} 최대 추가매수 횟수 초과")
-                                else:
-                                    remain = min_interval_between_additional_buys - elapsed
-                                    logging.info(f"{ticker} 추가매수 대기중: {remain:.2f}s 남음")
-
-                            # 매도 주문 상태 확인
-                            if sell_order_uuid[ticker]:
-                                async with non_order_request_limiter:
-                                    try:
-                                        order_info = await upbit_get_order_async(sell_order_uuid[ticker])
-                                    except Exception as e:
-                                        logging.error(f"{ticker} 매도 주문 조회 실패: {e}", exc_info=True)
-                                        order_info = None
-                                if order_info and order_info.get('state') == 'done':
-                                    logging.info(f"[매도 체결 완료] {ticker} 지정가 매도")
-                                    in_position[ticker] = False
-                                    holding_tickers.pop(ticker, None)
-                                    avg_buy_price_holdings.pop(ticker, None)
-                                    additional_buy_count.pop(ticker, None)
-                                    hold_start_time.pop(ticker, None)
+                            if sell_order_time[ticker] and time.time() - sell_order_time[ticker] > 600:
+                                logging.info(f"[watch_price] {ticker} 매도 주문 장기 미체결 -> 재주문")
+                                try:
+                                    async with non_order_request_limiter:
+                                        await upbit_cancel_order_async(sell_order_uuid[ticker])
                                     sell_order_uuid[ticker] = None
                                     sell_order_time[ticker] = None
-                                else:
-                                    # 장기 미체결(10분) -> 재주문
-                                    if sell_order_time[ticker] and time.time() - sell_order_time[ticker] > 600:
-                                        logging.info(f"{ticker} 매도 주문 장기 미체결, 재주문 시도")
-                                        try:
-                                            async with non_order_request_limiter:
-                                                await upbit_cancel_order_async(sell_order_uuid[ticker])
-                                            sell_order_uuid[ticker] = None
-                                            sell_order_time[ticker] = None
-                                            await place_limit_sell_order(ticker)
-                                        except Exception as e:
-                                            logging.error(f"{ticker} 매도 재주문 실패: {e}", exc_info=True)
-                            else:
-                                logging.info(f"{ticker} 보유 중이나 매도 주문 없음, 매도 주문 실행")
-                                await place_limit_sell_order(ticker)
-
+                                    await place_limit_sell_order(ticker)
+                                except Exception as e:
+                                    logging.error(f"[watch_price] {ticker} 매도 재주문 실패: {e}", exc_info=True)
                     else:
-                        # 잔고 0 -> 신규 매수 판단
-                        in_position[ticker] = False
-                        if ticker in excluded_tickers:
-                            logging.debug(f"{ticker} 제외 종목. 매수 X")
-                            continue
+                        await place_limit_sell_order(ticker)
 
-                        # 신규 종목 매수 제한
-                        skip_buy = await should_skip_new_buy()
-                        if skip_buy:
-                            logging.info(f"{ticker} 신규 매수 제한 (고액 코인 3개 이상 보유)")
-                            continue
+            else:
+                in_position[ticker] = False
+                if ticker in excluded_tickers:
+                    continue
 
-                        if rsi and rsi < rsi_threshold:
-                            logging.debug(f"{ticker} 매수 조건 충족. order_lock 획득")
-                            async with order_lock:
-                                balance = await upbit_get_balance_async(ticker)
-                                if balance == 0:
-                                    logging.info(f"{ticker} RSI: {rsi:.2f}")
-                                    krw_balance = await upbit_get_balance_async("KRW-KRW")
-                                    invest_amount = krw_balance * initial_invest_ratio
-                                    if invest_amount > 5000:
-                                        await place_buy_order(ticker, krw_balance, invest_amount)
-                                    else:
-                                        logging.info(f"{ticker} 매수 실패 - 잔고 부족")
-                                logging.debug(f"{ticker} order_lock 해제")
-                        else:
-                            if rsi and abs(rsi - rsi_threshold) <= 5:
-                                logging.info(f"{ticker} RSI {rsi:.2f}, 임계값 근접하나 부족")
+                skip_buy = await should_skip_new_buy()
+                if skip_buy:
+                    continue
+
+                if rsi and rsi < rsi_threshold:
+                    async with order_lock:
+                        balance = await upbit_get_balance_async(ticker)
+                        if balance == 0:
+                            logging.info(f"[watch_price] {ticker} RSI={rsi:.2f}, 매수 시도")
+                            krw_balance = await upbit_get_balance_async("KRW-KRW")
+                            invest_amount = krw_balance * initial_invest_ratio
+                            if invest_amount > 5000:
+                                await place_buy_order(ticker, krw_balance, invest_amount)
                             else:
-                                logging.debug(f"{ticker} RSI 조건 불충족, 매수 X")
+                                logging.info(f"[watch_price] {ticker} 매수 실패 - 잔고 부족")
+                else:
+                    pass
 
-                    # 주기적 리스트 갱신 타이밍
-                    if time.time() - last_update >= update_interval:
-                        logging.info("종목 리스트 갱신 위해 웹소켓 종료")
-                        break
+    except (websockets.exceptions.ConnectionClosedError,
+            websockets.exceptions.InvalidStatusCode,
+            requests.exceptions.ConnectTimeout,
+            requests.exceptions.ReadTimeout) as net_err:
+        logging.warning(f"[watch_price] 네트워크/웹소켓 오류 발생: {net_err}", exc_info=True)
+        return
+    except Exception as e:
+        logging.error(f"[watch_price] 예기치 못한 오류 발생: {e}", exc_info=True)
+        return
+    finally:
+        if websocket and not websocket.closed:
+            logging.info("[watch_price] finally: websocket.close() 실행")
+            try:
+                await asyncio.wait_for(websocket.close(), timeout=5)
+            except asyncio.TimeoutError:
+                logging.warning("[watch_price] websocket.close()가 5초 내 완료되지 않아 강제 종료 시도")
 
-        except (websockets.exceptions.ConnectionClosedError,
-                websockets.exceptions.InvalidStatusCode,
-                requests.exceptions.ConnectTimeout,
-                requests.exceptions.ReadTimeout) as net_err:
-            logging.warning(f"네트워크/웹소켓 오류 발생. 재시도: {net_err}", exc_info=True)
-            await asyncio.sleep(5)
-            continue
-        except Exception as e:
-            logging.error(f"watch_price 예기치 못한 오류: {e}", exc_info=True)
-            await asyncio.sleep(5)
-            continue
-        await asyncio.sleep(1)
+        logging.info("[watch_price] finally 블록 종료 -> watch_price 함수 완전 종료")
 
 # ------------------------------------------------------------
-# get_all_valid_tickers
+# 전체 유효 티커 조회
 # ------------------------------------------------------------
 async def get_all_valid_tickers():
     loop = asyncio.get_event_loop()
@@ -833,43 +853,42 @@ async def get_all_valid_tickers():
         valid_tickers = await loop.run_in_executor(executor, pyupbit.get_tickers, "KRW")
         return valid_tickers
     except Exception as e:
-        logging.error(f"전체 티커 조회 오류: {e}", exc_info=True)
+        logging.error(f"[get_all_valid_tickers] 전체 티커 조회 오류: {e}", exc_info=True)
         await asyncio.sleep(5)
         return []
 
 # ------------------------------------------------------------
-# main 함수
+# 메인 함수
 # ------------------------------------------------------------
 async def main():
-    logging.info("메인 함수 시작")
+    logging.info("[main] 메인 함수 시작")
 
     # 기존 지정가 매도 주문 취소
     await cancel_existing_sell_orders()
 
-    # 전체 유효 틱커 조회
+    # 전체 유효 티커 조회
     valid_tickers = await get_all_valid_tickers()
-    logging.info(f"유효한 종목 목록: {valid_tickers}")
+    logging.info(f"[main] 유효한 종목 개수: {len(valid_tickers)}")
 
-    # 잔고 조회
+    # 잔고 조회 및 캐시 갱신
     async with non_order_request_limiter:
         raw_balances = await upbit_get_balances_async()
-    logging.info(f"잔고 정보: {raw_balances}")
     await update_balances_cache()
 
     # 기존 보유 종목 상태 설정
-    for balance_info in raw_balances:
-        currency = balance_info['currency']
+    for b in raw_balances:
+        currency = b['currency']
         if currency == 'KRW':
             continue
-        amount = float(balance_info['balance'])
-        locked = float(balance_info['locked'])
+        amount = float(b['balance'])
+        locked = float(b['locked'])
         total_amount = amount + locked
         if total_amount <= 0:
             continue
 
         ticker = f"KRW-{currency}"
         if ticker not in valid_tickers:
-            logging.warning(f"{ticker} 유효하지 않은 종목(상장X)")
+            logging.warning(f"[main] {ticker} 유효하지 않은 종목(상장X)")
             continue
 
         in_position[ticker] = True
@@ -878,58 +897,61 @@ async def main():
         additional_buy_count[ticker] = 0
         sell_order_uuid[ticker] = None
         sell_order_time[ticker] = None
-        avg_price = float(balance_info['avg_buy_price'])
+        avg_price = float(b['avg_buy_price'])
         avg_buy_price_holdings[ticker] = avg_price
-        logging.info(f"기존 보유 종목: {ticker}, 수량: {total_amount}, 평균가: {avg_price}")
+        logging.info(f"[main] 기존 보유 종목: {ticker}, 수량: {total_amount}, 평균가: {avg_price}")
 
+        # locked가 있으면 기존 주문이 있을 수도
         if locked > 0:
             async with non_order_request_limiter:
                 orders = await upbit_get_order_list_async(state='wait')
             if isinstance(orders, list):
                 for order in orders:
-                    if (order.get('market') == ticker and
-                        order.get('side') == 'ask'):
+                    if order.get('market') == ticker and order.get('side') == 'ask':
                         sell_order_uuid[ticker] = order.get('uuid')
                         sell_order_time[ticker] = time.time()
-                        logging.info(f"{ticker} 기존 매도 주문 발견 - UUID: {sell_order_uuid[ticker]}")
+                        logging.info(f"[main] {ticker} 기존 매도 주문 발견 - UUID: {sell_order_uuid[ticker]}")
                         break
 
-        # 현재가 조회(웹소켓 전) → fallback
+        # 현재가 조회 (웹소켓 전이므로 fallback)
         prices_dict = await get_current_prices_async([ticker])
         current_price = prices_dict.get(ticker)
         if current_price is None:
-            logging.warning(f"{ticker} 현재 가격 불러오기 실패(None)")
+            logging.warning(f"[main] {ticker} 현재 가격 불러오기 실패(None)")
             continue
 
         profit_rate = (current_price - avg_price) / avg_price
-        logging.info(f"{ticker} 초기 수익률: {profit_rate*100:.2f}%")
+        logging.info(f"[main] {ticker} 초기 수익률: {profit_rate*100:.2f}%")
+
         if profit_rate <= maintain_profit_rate:
-            logging.info(f"{ticker} 수익률 추가 매수 기준 이하")
-            rsi = await get_rsi(ticker)
-            if rsi and rsi < rsi_threshold_additional:
-                logging.info(f"{ticker} RSI {rsi:.2f}, 추가 매수 대상 (watch_price에서 실행)")
-                # watch_price에서 실시간 가격 변동 시점에 추가매수 진행
-            else:
-                logging.info(f"{ticker} RSI 기준 미충족, 추가 매수 안함")
+            logging.info(f"[main] {ticker} 추가매수 로직은 watch_price에서")
         else:
-            logging.info(f"{ticker} 매도 주문 실행")
+            logging.info(f"[main] {ticker} 초기 지정가 매도 주문 실행")
             await place_limit_sell_order(ticker)
 
-    # 메인 루프 → 웹소켓 시세 확인
+    # 실시간 시세 감시
+    logging.info("[main] watch_price() 호출 시작")
     await watch_price()
+    logging.info("[main] watch_price() 종료됨 -> main() 함수도 종료 (상위 루프에서 재실행 예정)")
+    return
 
 # ------------------------------------------------------------
-# 프로그램 실행 시작점
+# 프로그램 실행 구간
 # ------------------------------------------------------------
 if __name__ == '__main__':
     while True:
         try:
+            logging.info("[__main__] ========== 메인 루프 시작 ==========")
             asyncio.run(main())
+            logging.info("[__main__] main() 정상 종료됨. 3초 후 재시작.")
+            time.sleep(3)
+
         except KeyboardInterrupt:
-            logging.info("프로그램 종료 요청")
+            logging.info("[__main__] 프로그램 종료 요청 (KeyboardInterrupt)")
             break
+
         except Exception as e:
-            logging.error(f"메인 함수 예외 발생: {e}", exc_info=True)
-            logging.info("5초 후 재시작 시도...")
+            logging.error(f"[__main__] 메인 함수 예외 발생: {e}", exc_info=True)
+            logging.info("[__main__] 5초 후 재시작 시도...")
             time.sleep(5)
             continue
