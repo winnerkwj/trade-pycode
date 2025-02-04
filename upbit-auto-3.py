@@ -524,7 +524,7 @@ async def place_limit_sell_order(ticker):
                 return
 
             # 안전하게 0.995 곱
-            safe_balance = math.floor(current_balance)
+            safe_balance = math.floor(current_balance * 0.995 * 1000000) / 1000000
             if safe_balance <= 0:
                 logging.info(f"[place_limit_sell_order] {ticker} safe_balance=0 -> 매도 중단")
                 return
@@ -568,6 +568,60 @@ async def place_limit_sell_order(ticker):
         logging.error(f"[place_limit_sell_order] {ticker} 예외 발생: {e}", exc_info=True)
 
 # ------------------------------------------------------------
+# 시장가 매도 주문
+# ------------------------------------------------------------
+async def place_market_sell_order(ticker):
+    logging.debug(f"[place_market_sell_order] {ticker} 시장가 매도 주문 시작")
+
+    current_balance = await get_fresh_balance(ticker)
+    if current_balance <= 0:
+        logging.info(f"[place_market_sell_order] {ticker} 잔고 부족, 매도 중단")
+        return
+
+    current_price = previous_prices.get(ticker)
+    if current_price is None:
+        p = await get_current_prices_async([ticker])
+        current_price = p.get(ticker)
+    if current_price is None:
+        logging.warning(f"[place_market_sell_order] {ticker} 현재가 조회 실패 -> 매도 취소")
+        return
+
+    total_order_value = current_price * current_balance
+    if total_order_value < MIN_SELL_ORDER_KRW:
+        logging.warning(f"[place_market_sell_order] {ticker} 매도 총액 {total_order_value:.2f}원 미달")
+        return
+
+    attempt = 0
+    while attempt < MAX_SELL_ATTEMPTS:
+        attempt += 1
+        try:
+            async with order_request_limiter:
+                order = await upbit_sell_market_order_async(ticker, current_balance)
+            if not isinstance(order, dict):
+                error_msg = order if order is not None else "None"
+                logging.error(f"[place_market_sell_order] {ticker} 시장가 매도 응답이 dict 아님: {error_msg} (시도 {attempt}/{MAX_SELL_ATTEMPTS})")
+                if order and "InsufficientFundsAsk" in str(order):
+                    logging.error(f"[place_market_sell_order] {ticker} 잔고 부족 오류 -> 즉시 스킵")
+                    return
+                await asyncio.sleep(1)
+                continue
+
+            if "InsufficientFundsAsk" in str(order):
+                logging.error(f"[place_market_sell_order] {ticker} 시장가 잔고 부족 -> 즉시 스킵")
+                return
+
+            logging.info(f"[매도 체결 완료] {ticker} 시장가 매도 - 수량: {current_balance}")
+            return
+        except Exception as e:
+            if "InsufficientFundsAsk" in str(e):
+                logging.error(f"[place_market_sell_order] {ticker} 잔고 부족 예외 -> 즉시 스킵: {e}", exc_info=True)
+                return
+
+            logging.error(f"[place_market_sell_order] {ticker} 시장가 매도 주문 실패 (시도 {attempt}/{MAX_SELL_ATTEMPTS}): {e}", exc_info=True)
+            await asyncio.sleep(1)
+    logging.error(f"[place_market_sell_order] {ticker} 시장가 매도 주문 실패 - 최대 시도 횟수 초과")
+
+# ------------------------------------------------------------
 # 신규 매수 제한 조건
 # ------------------------------------------------------------
 async def should_skip_new_buy():
@@ -597,7 +651,7 @@ async def watch_price():
     url = "wss://api.upbit.com/websocket/v1"
     global previous_prices, previous_profit_rates
 
-    update_interval = 3600
+    update_interval = 60
     start_time = time.time()
 
     websocket = None
@@ -606,7 +660,7 @@ async def watch_price():
         websocket = await websockets.connect(url, ping_interval=60, ping_timeout=10)
         logging.info("[watch_price] 웹소켓 연결 완료")
 
-        tickers = await get_top_volume_tickers(limit=5)
+        tickers = await get_top_volume_tickers(limit=60)
         all_tickers = list(set(tickers + list(holding_tickers.keys())))
         all_tickers = [t for t in all_tickers if t not in excluded_tickers]
 
