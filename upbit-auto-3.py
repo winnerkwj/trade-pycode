@@ -22,7 +22,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 # ------------------------------------------------------------
 # 제외할 종목 목록
 # ------------------------------------------------------------
-excluded_tickers = ['KRW-BTC', 'KRW-USDT', 'KRW-BTG','KRW-MOCA','KRW-SAND','KRW-GRT']
+excluded_tickers = ['KRW-BTC', 'KRW-USDT', 'KRW-BTG','KRW-MOCA','KRW-SAND','KRW-GRT','KRW-AERGO']
 
 # ------------------------------------------------------------
 # 소수점 제외필요 목록

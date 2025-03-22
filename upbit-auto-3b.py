@@ -20,7 +20,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 # ------------------------------------------------------------
 # 제외할 종목 목록 & 소수점 제외 목록
 # ------------------------------------------------------------
-excluded_tickers = ['KRW-BTC','KRW-USDT','KRW-BTG','KRW-MOCA','KRW-SAND','KRW-GRT']
+excluded_tickers = ['KRW-BTC','KRW-USDT','KRW-BTG','KRW-MOCA','KRW-SAND','KRW-GRT', 'KRW-AERGO',]
 drop_point = ['KRW-BLUR','KRW-SAND','KRW-SEI','KRW-ALGO','KRW-POL','KRW-GRT']
 
 # ------------------------------------------------------------
