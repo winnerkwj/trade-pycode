@@ -65,9 +65,9 @@ executor = concurrent.futures.ThreadPoolExecutor()
 # ------------------------------------------------------------
 # 업비트 API 키 로딩
 # ------------------------------------------------------------
-
-access = fDuX7QR5e4DSzcUpgitPYWJJebT0T7ncTz8NXNdr
-secret = NVQ5JP6lON4AICvx9IWq0EoPu58Ax4hRAxrHbNcm
+with open(key_file_path, 'r') as file:
+    access = file.readline().strip()
+    secret = file.readline().strip()
 
 upbit = pyupbit.Upbit(access, secret)
 
