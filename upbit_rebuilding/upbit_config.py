@@ -1,16 +1,13 @@
 import pyupbit
+import os
 
-# ------------------------------------------------------------
-# 로그인
-# ------------------------------------------------------------
-key_file_path = r'/home/winnerkwj/trade/upbit_k.txt'
+# ① 키 파일 절대 경로 지정
+key_file_path = r"C:\Users\winne\OneDrive\바탕 화면\upbit_key.txt"
 
-with open(key_file_path, 'r') as file:
-    access = file.readline().strip()
-    secret = file.readline().strip()
-
-upbit = pyupbit.Upbit(access, secret)
-
+# ② 파일 열어서 ACCESS / SECRET 읽기
+with open(key_file_path, "r", encoding="utf-8") as file:
+    ACCESS_KEY  = file.readline().strip()
+    SECRET_KEY  = file.readline().strip()
 # ------------------------------------------------------------
 # upbit_config.py
 #  - API키 / 환경 변수 / 파라미터 / 사용자 설정 모음

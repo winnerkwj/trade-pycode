@@ -6,11 +6,11 @@ import logging
 import pyupbit
 import time
 
-from upbit_exception import (
+from .upbit_exception import (
     handle_network_exception,
     handle_order_exception
 )
-from upbit_utils import get_tick_size
+from .upbit_utils import get_tick_size
 
 def place_limit_sell_order(upbit, ticker: str, volume: float, target_price: float) -> str:
     """

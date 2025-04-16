@@ -7,7 +7,7 @@ import time
 import pyupbit
 
 # 모듈 import
-from upbit_config import (
+from .upbit_config import (
     ACCESS_KEY, SECRET_KEY,
     ALLOWED_TICKERS, MAX_COINS,
     RSI_THRESHOLD, RSI_THRESHOLD_ADDITIONAL,
@@ -17,16 +17,16 @@ from upbit_config import (
     MAX_ADDITIONAL_BUYS,
     LOOP_INTERVAL
 )
-from upbit_utils import (
+from .upbit_utils import (
     get_current_price, get_rsi
 )
-from upbit_buy import place_buy_order
-from upbit_sell import (
+from .upbit_buy import place_buy_order
+from .upbit_sell import (
     place_limit_sell_order,
     place_market_sell_order,
     cancel_order
 )
-from upbit_exception import handle_general_exception
+from .upbit_exception import handle_general_exception
 
 # 전역 상태관리 딕셔너리
 in_position = {}               # 티커별 보유중 여부

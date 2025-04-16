@@ -7,7 +7,7 @@ import logging
 import pandas as pd
 import time
 
-from upbit_config import (
+from .upbit_config import (
     RSI_PERIOD,
     RSI_CALC_INTERVAL
 )
