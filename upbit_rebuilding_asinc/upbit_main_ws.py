@@ -1,131 +1,159 @@
 # upbit_rebuilding/upbit_main_ws.py
+"""
+웹소켓 시세 + 2단계 추매 로직
+  ① 소량 추매  : RSI < RSI_THRESHOLD_ADDITIONAL
+  ② 정밀 추매  : RSI < RSI_CUSTOM_TRIGGER  &  손익률 <= MAINTAIN_PROFIT_RATE
+                 → 목표 손익률(-0.55 %)에 맞춰 평단을 끌어올릴 수량만큼 일괄 매수
+"""
 import logging, time, pyupbit
-
-from .upbit_config   import *
-from .upbit_utils    import get_current_price, get_rsi
-from .upbit_buy      import place_buy_order
-from .upbit_sell     import place_limit_sell_order, place_market_sell_order, cancel_order
+from .upbit_config  import *
+from .upbit_utils   import get_current_price, get_rsi
+from .upbit_buy     import place_buy_order
+from .upbit_sell    import place_limit_sell_order, place_market_sell_order, cancel_order
+from .upbit_stream  import PriceStreamer, price_cache
 from .upbit_exception import handle_general_exception
-from .upbit_stream    import PriceStreamer, price_cache
 
-# ------------- 전역 상태 ----------------
-in_position               = {}
-avg_buy_price_holdings    = {}
-additional_buy_count      = {}
-sell_order_uuid           = {}
-last_additional_buy_time  = {}
-# ----------------------------------------
+# ---------- 전역 상태 ----------
+in_position, avg_buy = {}, {}
+add_cnt, sell_uuid, last_add = {}, {}, {}
+# ------------------------------
+
+def q_add_needed(q_prev, c_prev, p_now, tgt)->float:
+    """목표 손익률(tgt) 기준 새 평단으로 맞추기 위한 추가 수량"""
+    c_new = p_now / (1 + tgt)           # 목표 평단
+    denom = c_new - p_now
+    if denom <= 0: 
+        return 0.0
+    return (q_prev * (c_prev - c_new)) / denom
 
 def main():
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [%(levelname)s] %(message)s"
-    )
+    logging.basicConfig(level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(message)s")
 
     upbit = pyupbit.Upbit(ACCESS_KEY, SECRET_KEY)
+    streamer = PriceStreamer(ALLOWED_TICKERS); streamer.start()
 
-    # 웹소켓 스트리머 시작
-    streamer = PriceStreamer(ALLOWED_TICKERS)
-    streamer.start()
-
-    # 초기 잔고 → 보유 종목 인식
+    # ----- 기존 보유 잔고 반영 -----
     for b in upbit.get_balances():
-        if b['currency'] == 'KRW': continue
+        if b['currency'] == 'KRW': 
+            continue
         tkr = f"KRW-{b['currency']}"
         qty = float(b['balance']) + float(b['locked'])
         if qty > 0:
             in_position[tkr] = True
-            avg_buy_price_holdings[tkr] = float(b['avg_buy_price'])
-            additional_buy_count[tkr] = 0
-            sell_order_uuid[tkr] = ""
-            last_additional_buy_time[tkr] = 0
-            logging.info(f"[INIT HOLD] {tkr} {qty=} {avg_buy_price_holdings[tkr]=}")
+            avg_buy[tkr]     = float(b['avg_buy_price'])
+            add_cnt[tkr]     = 0
+            sell_uuid[tkr]   = ""
+            last_add[tkr]    = 0
 
-    # ---------- 메인 루프 ----------
     try:
         while True:
-            # 1) 구독 목록 최신화 (보유 + 관심)
-            sub_codes = ALLOWED_TICKERS + [t for t, v in in_position.items() if v]
-            streamer.update_tickers(sub_codes)
+            streamer.update_tickers(
+                ALLOWED_TICKERS + [t for t, v in in_position.items() if v]
+            )
 
-            # 2) 각 티커 의사결정
             balances = upbit.get_balances()
-            krw_info = next((x for x in balances if x['currency'] == 'KRW'), None)
-            krw_balance = float(krw_info['balance']) if krw_info else 0.0
+            krw_bal  = float(
+                next((b for b in balances if b['currency'] == 'KRW'), 
+                     {"balance": 0})['balance']
+            )
 
-            for ticker in ALLOWED_TICKERS:
-                cur_price = price_cache.get(ticker) or get_current_price(ticker)
-                if cur_price is None: continue
-
-                bal_info = next((x for x in balances if x['currency'] == ticker.split('-')[1]), None)
-                hold_amt = float(bal_info['balance']) + float(bal_info['locked']) if bal_info else 0.0
-
-                # -------- 매수 진입 --------
-                if hold_amt == 0:
-                    in_position[ticker] = False
-                    if len([t for t, v in in_position.items() if v]) >= MAX_COINS:
-                        continue
-                    if get_rsi(ticker) < RSI_THRESHOLD:
-                        invest = krw_balance * INITIAL_INVEST_RATIO
-                        if invest >= 5_000:
-                            if place_buy_order(upbit, ticker, invest):
-                                time.sleep(1)
-                                balances = upbit.get_balances()  # 갱신
-                                new_bal = next(x for x in balances if x['currency']==ticker.split('-')[1])
-                                hold_amt = float(new_bal['balance']) + float(new_bal['locked'])
-                                avg   = float(new_bal['avg_buy_price'])
-                                in_position[ticker] = True
-                                avg_buy_price_holdings[ticker] = avg
-                                sell_price = avg * (1 + TARGET_PROFIT_RATE + 0.001)
-                                sell_uuid  = place_limit_sell_order(upbit, ticker, hold_amt, sell_price)
-                                sell_order_uuid[ticker] = sell_uuid
-                                additional_buy_count[ticker] = 0
-                                last_additional_buy_time[ticker] = time.time()
-                    continue  # 매수 시도했으면 다음 티커
-
-                # -------- 보유 상태 --------
-                in_position[ticker] = True
-                avg   = avg_buy_price_holdings.get(ticker, float(bal_info['avg_buy_price']))
-                pnl   = (cur_price - avg) / avg
-
-                # 2‑A) 손절
-                if pnl <= STOP_LOSS_RATE:
-                    if sell_order_uuid.get(ticker):
-                        cancel_order(upbit, sell_order_uuid[ticker])
-                    place_market_sell_order(upbit, ticker, hold_amt)
-                    in_position[ticker] = False
-                    sell_order_uuid[ticker] = ""
+            for tkr in ALLOWED_TICKERS:
+                p_now = price_cache.get(tkr) or get_current_price(tkr)
+                if p_now is None:
                     continue
 
-                # 2‑B) 추매
+                bal = next((b for b in balances 
+                            if b['currency'] == tkr.split('-')[1]), None)
+                q_prev = float(bal['balance']) + float(bal['locked']) if bal else 0.0
+
+                # --------- A. 미보유 진입 ---------
+                if q_prev == 0:
+                    if len([t for t, v in in_position.items() if v]) >= MAX_COINS:
+                        continue
+                    if get_rsi(tkr) < RSI_THRESHOLD:
+                        invest = krw_bal * INITIAL_INVEST_RATIO
+                        if invest >= 5_000 and place_buy_order(upbit, tkr, invest):
+                            time.sleep(1)
+                            balances = upbit.get_balances()
+                            bal = next(x for x in balances 
+                                       if x['currency'] == tkr.split('-')[1])
+                            q_prev = float(bal['balance']) + float(bal['locked'])
+                            avg = float(bal['avg_buy_price'])
+                            in_position[tkr] = True
+                            avg_buy[tkr]     = avg
+                            sell_uuid[tkr]   = place_limit_sell_order(
+                                upbit, tkr, q_prev, avg * (1 + TARGET_PROFIT_RATE + 0.001)
+                            )
+                            add_cnt[tkr]  = 0
+                            last_add[tkr] = time.time()
+                    continue
+
+                # --------- B. 보유 상태 ---------
+                avg = avg_buy.get(tkr, float(bal['avg_buy_price']))
+                pnl = (p_now - avg) / avg
+
+                # (1) 손절
+                if pnl <= STOP_LOSS_RATE:
+                    if sell_uuid.get(tkr):
+                        cancel_order(upbit, sell_uuid[tkr])
+                    place_market_sell_order(upbit, tkr, q_prev)
+                    in_position[tkr] = False
+                    sell_uuid[tkr]   = ""
+                    continue
+
+                # (2) 추매 후보
                 if pnl <= MAINTAIN_PROFIT_RATE:
                     now = time.time()
-                    if (now - last_additional_buy_time.get(ticker, 0) > MIN_INTERVAL_BETWEEN_ADDITIONAL_BUYS
-                        and additional_buy_count.get(ticker,0) < MAX_ADDITIONAL_BUYS
-                        and get_rsi(ticker) < RSI_THRESHOLD_ADDITIONAL):
-                        invest = krw_balance * INITIAL_INVEST_RATIO
-                        if invest >= 5_000:
-                            if sell_order_uuid.get(ticker):
-                                cancel_order(upbit, sell_order_uuid[ticker])
-                            if place_buy_order(upbit, ticker, invest):
-                                additional_buy_count[ticker] += 1
-                                last_additional_buy_time[ticker] = now
-                                time.sleep(1)
-                                balances = upbit.get_balances()
-                                new_bal = next(x for x in balances if x['currency']==ticker.split('-')[1])
-                                hold_amt = float(new_bal['balance']) + float(new_bal['locked'])
-                                avg   = float(new_bal['avg_buy_price'])
-                                avg_buy_price_holdings[ticker] = avg
-                                sell_price = avg * (1 + TARGET_PROFIT_RATE + 0.001)
-                                sell_order_uuid[ticker] = place_limit_sell_order(upbit, ticker, hold_amt, sell_price)
+                    if now - last_add.get(tkr, 0) > MIN_INTERVAL_BETWEEN_ADDITIONAL_BUYS \
+                       and add_cnt.get(tkr, 0) < MAX_ADDITIONAL_BUYS:
 
-                # 2‑C) 매도 체결 확인
-                if sell_order_uuid.get(ticker):
-                    od = upbit.get_order(sell_order_uuid[ticker])
+                        rsi_val = get_rsi(tkr)
+
+                        # 2‑a) 소량 추매
+                        if rsi_val < RSI_THRESHOLD_ADDITIONAL:
+                            invest = krw_bal * INITIAL_INVEST_RATIO
+                            if invest >= 5_000:
+                                if sell_uuid.get(tkr):
+                                    cancel_order(upbit, sell_uuid[tkr])
+                                if place_buy_order(upbit, tkr, invest):
+                                    add_cnt[tkr]  += 1
+                                    last_add[tkr]  = now
+
+                        # 2‑b) 정밀 추매 (Precision AD)
+                        if RSI_CUSTOM_TRIGGER and rsi_val < RSI_CUSTOM_TRIGGER:
+                            q_add = q_add_needed(q_prev, avg, p_now, MAINTAIN_PROFIT_RATE)
+                            invest_needed = q_add * p_now
+                            if invest_needed >= 5_000 and krw_bal >= invest_needed:
+                                if sell_uuid.get(tkr):
+                                    cancel_order(upbit, sell_uuid[tkr])
+                                if place_buy_order(upbit, tkr, invest_needed):
+                                    add_cnt[tkr]  += 1
+                                    last_add[tkr]  = now
+                                    logging.info(
+                                        f"[Precision AD] {tkr} +{invest_needed:.0f} KRW"
+                                    )
+
+                        # 추매 후 상태 갱신
+                        if last_add[tkr] == now:
+                            time.sleep(1)
+                            balances = upbit.get_balances()
+                            bal = next(x for x in balances 
+                                       if x['currency'] == tkr.split('-')[1])
+                            q_prev = float(bal['balance']) + float(bal['locked'])
+                            avg    = float(bal['avg_buy_price'])
+                            avg_buy[tkr] = avg
+                            sell_uuid[tkr] = place_limit_sell_order(
+                                upbit, tkr, q_prev, avg * (1 + TARGET_PROFIT_RATE + 0.001)
+                            )
+
+                # (3) 매도 체결 확인
+                if sell_uuid.get(tkr):
+                    od = upbit.get_order(sell_uuid[tkr])
                     if od and od['state'] == 'done':
-                        in_position[ticker] = False
-                        sell_order_uuid[ticker] = ""
-                        logging.info(f"[SELL DONE] {ticker}")
+                        in_position[tkr] = False
+                        sell_uuid[tkr]   = ""
+                        logging.info(f"[SELL DONE] {tkr}")
 
             time.sleep(LOOP_INTERVAL)
 
