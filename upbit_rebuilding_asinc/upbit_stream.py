@@ -1,52 +1,50 @@
-# upbit_rebuilding/upbit_stream.py
+# upbit_rebuilding_asinc/upbit_stream.py
 import asyncio, json, threading, time, logging, websockets
+UPBIT_WS = "wss://api.upbit.com/websocket/v1"
 
-UPBIT_WS_URL = "wss://api.upbit.com/websocket/v1"
-
-price_cache: dict[str, float] = {}
-price_cache_ts: dict[str, float] = {}
+price_cache, price_cache_ts = {}, {}
 
 class PriceStreamer(threading.Thread):
-    def __init__(self, tickers, reconnect_interval=5):
+    """웹소켓 → price_cache"""
+    def __init__(self, tickers, reconnect=5):
         super().__init__(daemon=True)
-        self._tickers = tickers
-        self._tick_lock = threading.Lock()
-        self._stop_evt = threading.Event()
-        self._reconnect_interval = reconnect_interval
+        self._tickers = list(tickers)
+        self._lock    = threading.Lock()
+        self._stop    = threading.Event()
+        self._reconnect = reconnect
 
-    # --- 외부 API ---------------------------------------------------
+    # ───────── 메서드 이름 두 가지 모두 지원 ─────────
     def update_tickers(self, tickers):
-        with self._tick_lock:
+        with self._lock:
             self._tickers = list(set(tickers))
 
+    update = update_tickers          # ★ alias 1줄 추가
+    # ────────────────────────────────────────────────
+
     def stop(self):
-        self._stop_evt.set()
-    # ---------------------------------------------------------------
+        self._stop.set()
 
-    async def _stream_loop(self):
-        while not self._stop_evt.is_set():
+    async def _loop(self):
+        while not self._stop.is_set():
             try:
-                async with websockets.connect(UPBIT_WS_URL, ping_interval=60, ping_timeout=10) as ws:
-                    with self._tick_lock:
+                async with websockets.connect(UPBIT_WS, ping_interval=60) as ws:
+                    with self._lock:
                         codes = self._tickers.copy()
-                    sub_msg = [
-                        {"ticket": "price-stream"},
-                        {"type": "ticker", "codes": codes, "isOnlyRealtime": True},
-                        {"format": "SIMPLE"}
-                    ]
-                    await ws.send(json.dumps(sub_msg))
+                    await ws.send(json.dumps([
+                        {"ticket":"price-stream"},
+                        {"type":"ticker","codes":codes,"isOnlyRealtime":True},
+                        {"format":"SIMPLE"}
+                    ]))
                     logging.info(f"[WS] subscribe {codes}")
-
-                    while not self._stop_evt.is_set():
-                        data = await asyncio.wait_for(ws.recv(), timeout=30)
-                        msg = json.loads(data)
-                        if isinstance(msg, dict) and 'cd' in msg and 'tp' in msg:
-                            tkr = msg['cd']
-                            price_cache[tkr] = msg['tp']
-                            price_cache_ts[tkr] = time.time()
+                    while not self._stop.is_set():
+                        raw = await asyncio.wait_for(ws.recv(), timeout=30)
+                        msg = json.loads(raw)
+                        if 'cd' in msg and 'tp' in msg:
+                            price_cache[msg['cd']]   = msg['tp']
+                            price_cache_ts[msg['cd']] = time.time()
             except Exception as e:
-                logging.warning(f"[WS] reconnect due to {e}")
-                await asyncio.sleep(self._reconnect_interval)
+                logging.warning(f"[WS] reconnect: {e}")
+                await asyncio.sleep(self._reconnect)
 
     def run(self):
-        asyncio.run(self._stream_loop())
+        asyncio.run(self._loop())

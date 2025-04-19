@@ -1,27 +1,45 @@
-# upbit_rebuilding/upbit_buy.py
+# upbit_rebuilding_asinc/upbit_buy.py
+"""
+지정가 매수 유틸 (동기 함수)
+  · 3회 재시도
+  · REST 실패 / 주문 실패 시 wait & retry
+"""
 import logging, time, pyupbit
+from .upbit_utils      import get_current_price
+from .upbit_exception  import handle_network_exception as net_err
+from .upbit_exception  import handle_order_exception   as order_err
 
-from .upbit_exception import handle_network_exception, handle_order_exception
+__all__ = ["place_buy"]   # 외부에서 import 가능한 심볼
 
-def place_buy_order(upbit, ticker: str, invest_amount: float) -> bool:
-    max_retry = 3
-    for attempt in range(1, max_retry + 1):
+def place_buy(upbit, ticker: str, invest_krw: float) -> bool:
+    """
+    지정가 매수 후 바로 체결 확인
+      upbit   : pyupbit.Upbit 객체
+      ticker  : 'KRW-BTC' 형식
+      invest_krw : 원화 금액
+    return True  → 체결 완료
+           False → 실패
+    """
+    for attempt in range(1, 4):
+        price = get_current_price(ticker)
+        if price is None:
+            time.sleep(1); continue
+
+        volume = round(invest_krw / price, 8)
         try:
-            price = pyupbit.get_current_price(ticker)
-            if price is None:
-                time.sleep(1); continue
-            volume = round(invest_amount / price, 8)
-            order  = upbit.buy_limit_order(ticker, price, volume)
-            logging.info(f"[BUY TRY {attempt}] {ticker} {price=:.0f}, {volume=}")
+            order = upbit.buy_limit_order(ticker, price, volume)
+            logging.info(f"[BUY {attempt}] {ticker} {volume=:.8f}@{price:.0f}")
             time.sleep(1)
-            detail = upbit.get_order(order['uuid'])
-            if detail and detail.get('state') == 'done':
+
+            if upbit.get_order(order['uuid']).get('state') == 'done':
                 logging.info(f"[BUY DONE] {ticker}")
                 return True
-            upbit.cancel_order(order['uuid'])
+
+            upbit.cancel_order(order['uuid'])   # 미체결 취소 후 재시도
         except pyupbit.exceptions.UpbitError as e:
-            handle_order_exception(e)
+            order_err(e)
         except Exception as e:
-            handle_network_exception(e)
-    logging.error(f"[BUY FAIL] {ticker}")
+            net_err(e)
+
+    logging.warning(f"[BUY FAIL] {ticker}")
     return False
