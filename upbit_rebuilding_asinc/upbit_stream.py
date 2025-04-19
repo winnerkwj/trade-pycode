@@ -21,6 +21,20 @@ class PriceStreamer(threading.Thread):
     update = update_tickers          # ★ alias 1줄 추가
     # ────────────────────────────────────────────────
 
+minute_ohlc = {}        # {ticker: {'o','h','l','c','ts'}}
+def _update_ohlc(tkr:str, price:float):
+    now = time.time()
+    ts = int(now//60)*60
+    candle = minute_ohlc.get(tkr)
+    if candle and candle['ts']==ts:
+        candle['h'] = max(candle['h'], price)
+        candle['l'] = min(candle['l'], price)
+        candle['c'] = price
+    else:
+        minute_ohlc[tkr]={'o':price,'h':price,'l':price,'c':price,'ts':ts}
+
+
+
     def stop(self):
         self._stop.set()
 
@@ -42,6 +56,7 @@ class PriceStreamer(threading.Thread):
                         if 'cd' in msg and 'tp' in msg:
                             price_cache[msg['cd']]   = msg['tp']
                             price_cache_ts[msg['cd']] = time.time()
+                            _update_ohlc(msg['cd'], msg['tp'])
             except Exception as e:
                 logging.warning(f"[WS] reconnect: {e}")
                 await asyncio.sleep(self._reconnect)
