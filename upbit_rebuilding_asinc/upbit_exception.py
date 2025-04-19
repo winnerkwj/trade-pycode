@@ -1,3 +1,4 @@
+# ===== file: upbit_exception.py =====
 import logging, time
 
 __all__ = [
