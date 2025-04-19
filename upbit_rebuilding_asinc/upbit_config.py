@@ -7,26 +7,28 @@ KEY_FILE = r"C:\Users\winne\OneDrive\바탕 화면\upbit_key.txt"
 with open(KEY_FILE, "r", encoding="utf-8") as f:
     ACCESS_KEY, SECRET_KEY = [line.strip() for line in f.readlines()[:2]]
 
-# 2) 최대 동시 보유 종목 수 ---------------------------------------------
-MAX_COINS       = 2
+# ─── Top N + 필터/회전 주기 ───
+TOP_N_TICKERS           = 60             # Top N 개 종목
+TICKER_FILTER_INTERVAL  = 15 * 60        # 필터 재적용 주기 (초)
+TICKER_ROTATE_INTERVAL  = 60 * 60        # Top N 갱신 주기 (초)
 
-# 3) 전략 파라미터 ---------------------------------------------------
-RSI_PERIOD            = 14
-RSI_THRESHOLD         = 10
-RSI_CUSTOM_TRIGGER    = 35
+# ─── 포지션 제한 ───
+MAX_COINS               = 6              # 동시에 보유 가능한 종목 수
 
-TARGET_PROFIT_RATE    = 0.0030
-MAINTAIN_PROFIT_RATE  = -0.0055
-STOP_LOSS_RATE        = -0.6
-INITIAL_INVEST_RATIO  = 0.05
+# ─── RSI 설정 ───
+RSI_PERIOD              = 14             # RSI 연산 기간
+RSI_CACHE_SEC           = 60             # RSI 캐시 유효 시간 (초)
+WS_OHLC_USE             = True           # WS로 받은 OHLC 캐시 사용 여부
 
-MIN_INTERVAL_BETWEEN_ADDITIONAL_BUYS = 60
+RSI_THRESHOLD           = 20             # 1차 매수 RSI 기준
+RSI_CUSTOM_TRIGGER      = 15             # 정밀추매 RSI 기준
 
-# 4) 주기 · 캐시 -----------------------------------------------------
-RSI_CACHE_SEC          = 60
-LOOP_INTERVAL          = 1
+# ─── 수익/손절/추매 설정 ───
+TARGET_PROFIT_RATE      = 0.003          # 목표 수익률 (0.3%)
+MAINTAIN_PROFIT_RATE    = -0.0055        # 추가매수 진입 수익률 기준 (-0.55%)
+STOP_LOSS_RATE          = -0.6           # 손절 수익률 기준 (-60%)
 
-TICKER_ROTATE_INTERVAL = 600    # Top N 재계산 주기 (초)
-TOP_N_TICKERS          = 60      # 24 h 거래대금 상위 N 종목
-TICKER_FILTER_INTERVAL = 900     # Upbit 필터 주기 (초)
-WS_OHLC_USE            = True    # WS 1 분 OHLC 캐시 사용 여부
+# ─── 투자비율·쿨다운·루프 인터벌 ───
+INITIAL_INVEST_RATIO                = 0.05    # 전체 KRW 대비 1차 매수 비율
+MIN_INTERVAL_BETWEEN_ADDITIONAL_BUYS = 600    # 추가매수 최소 간격 (초)
+LOOP_INTERVAL                        = 1      # 메인 루프 인터벌 (초)
